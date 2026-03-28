@@ -16,6 +16,7 @@ def get_exchange() -> ccxt.binance:
             "apiKey": config.BINANCE_API_KEY,
             "secret": config.BINANCE_API_SECRET,
             "options": {"defaultType": "future"},
+            "adjustForTimeDifference": True,  # автоматически синхронизирует время с сервером
         }
     )
     if config.BINANCE_TESTNET:
@@ -26,12 +27,19 @@ def get_exchange() -> ccxt.binance:
     return exchange
 
 
+def _sync_time() -> ccxt.binance:
+    """Получить биржу с синхронизированным временем."""
+    exchange = get_exchange()
+    exchange.load_time_difference()
+    return exchange
+
+
 def place_market_order(symbol: str, side: str, quantity: float) -> dict:
     """
     Выставить рыночный ордер.
     side: 'buy' для LONG, 'sell' для SHORT
     """
-    exchange = get_exchange()
+    exchange = _sync_time()
     order = exchange.create_order(
         symbol=symbol,
         type="market",
@@ -47,7 +55,7 @@ def place_stop_loss_order(symbol: str, side: str, quantity: float, stop_price: f
     Выставить стоп-лосс ордер.
     Для LONG позиции side='sell', для SHORT — side='buy'.
     """
-    exchange = get_exchange()
+    exchange = _sync_time()
     order = exchange.create_order(
         symbol=symbol,
         type="stop_market",
@@ -61,7 +69,7 @@ def place_stop_loss_order(symbol: str, side: str, quantity: float, stop_price: f
 
 def place_take_profit_order(symbol: str, side: str, quantity: float, tp_price: float) -> dict:
     """Выставить тейк-профит ордер."""
-    exchange = get_exchange()
+    exchange = _sync_time()
     order = exchange.create_order(
         symbol=symbol,
         type="take_profit_market",

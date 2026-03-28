@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import joblib
@@ -120,14 +121,39 @@ def train(symbol: str) -> None:
     logger.info(f"{'='*50}")
 
 
-def train_all() -> None:
-    """Обучить модели для всех символов из конфига."""
+def needs_training(symbol: str) -> bool:
+    """Проверить нужно ли обучать модель."""
+    symbol_key = symbol.replace("/", "_")
+    model_path = MODELS_DIR / f"{symbol_key}_model.pkl"
+
+    if not model_path.exists():
+        logger.info(f"  {symbol}: модель не найдена → нужно обучить")
+        return True
+
+    age_days = (datetime.now().timestamp() - model_path.stat().st_mtime) / 86400
+    if age_days > 30:
+        logger.info(f"  {symbol}: модель устарела ({age_days:.0f} дней) → переобучаем")
+        return True
+
+    logger.info(f"  {symbol}: модель актуальна ({age_days:.0f} дней) → пропускаем")
+    return False
+
+
+def train_all(force: bool = False) -> None:
+    """
+    Обучить модели для всех символов из конфига.
+    force=True — переобучить даже если модели актуальны.
+    """
     symbols = config.TRADING_SYMBOLS
     logger.info(f"")
     logger.info(f"🚀 Запуск обучения моделей")
     logger.info(f"Символы: {', '.join(symbols)}")
     logger.info(f"Таймфрейм: {config.TIMEFRAME}")
     logger.info(f"История: {config.TRAINING_YEARS} года")
+    if not force:
+        logger.info(f"Режим: умный (пропускаем актуальные модели)")
+    else:
+        logger.info(f"Режим: принудительное переобучение")
     logger.info(f"Примерное время: {len(symbols) * 5}-{len(symbols) * 15} минут")
     logger.info(f"")
 
@@ -136,6 +162,9 @@ def train_all() -> None:
 
     for i, symbol in enumerate(symbols, 1):
         logger.info(f"Символ {i}/{len(symbols)}: {symbol}")
+        if not force and not needs_training(symbol):
+            success.append(symbol)
+            continue
         try:
             train(symbol)
             success.append(symbol)

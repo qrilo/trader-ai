@@ -18,6 +18,7 @@ def _get_exchange(sandbox: bool = False) -> ccxt.binance:
             "apiKey": config.BINANCE_API_KEY,
             "secret": config.BINANCE_API_SECRET,
             "options": {"defaultType": "future"},
+            "adjustForTimeDifference": True,  # автоматически синхронизирует время с сервером
         }
     )
     if sandbox:
@@ -41,6 +42,7 @@ def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> pd.D
     limit = limit or config.CANDLES_LIMIT
 
     exchange = _get_data_exchange()
+    exchange.load_time_difference()
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -60,6 +62,11 @@ def fetch_historical_candles(symbol: str, timeframe: str = "15m", years: int = 2
     API ключи для этого не нужны.
     """
     exchange = _get_data_exchange()
+
+    # Синхронизируем время с сервером Binance перед загрузкой
+    logger.info(f"  Синхронизация времени с Binance...")
+    exchange.load_time_difference()
+
     since = int((datetime.utcnow() - timedelta(days=365 * years)).timestamp() * 1000)
     all_candles = []
     batch = 0
@@ -100,6 +107,7 @@ def fetch_historical_candles(symbol: str, timeframe: str = "15m", years: int = 2
 def get_account_balance() -> float:
     """Получить баланс аккаунта в USDT (с торговой биржи — Testnet или реальной)."""
     exchange = _get_trading_exchange()
+    exchange.load_time_difference()
     try:
         balance = exchange.fetch_balance()
         usdt_balance = balance.get("USDT", {}).get("free", 0.0)

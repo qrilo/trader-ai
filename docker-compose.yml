@@ -28,8 +28,6 @@ services:
       db:
         condition: service_healthy
     command: python -c "from models.trainer import train_all; train_all()"
-    profiles:
-      - train   # запускается только явно: docker compose --profile train up trainer
 
   traider:
     build: .
@@ -43,6 +41,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      trainer:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

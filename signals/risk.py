@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-from config import config
-
 
 @dataclass
 class RiskParams:
@@ -17,37 +15,28 @@ class RiskParams:
 def calculate_risk_params(
     direction: str,
     entry_price: float,
-    atr: float,
-    balance_usdt: float,
+    margin_usdt: float,
+    sl_percent: float,
+    tp_percent: float,
 ) -> RiskParams:
     """
-    Рассчитать SL, TP и размер позиции на основе ATR.
-
-    SL = 1.5 * ATR от точки входа
-    TP = SL * MIN_RR_RATIO (минимум 1:2)
-    Размер позиции = RISK_PER_TRADE% от баланса / расстояние до SL
+    SL/TP от цены входа в процентах; position_size_usdt = маржа (USDT на сделку).
     """
-    sl_distance = atr * 1.5
-    tp_distance = sl_distance * config.MIN_RR_RATIO
+    sl_frac = sl_percent / 100.0
+    tp_frac = tp_percent / 100.0
 
     if direction == "LONG":
-        stop_loss = entry_price - sl_distance
-        take_profit = entry_price + tp_distance
+        stop_loss = entry_price * (1 - sl_frac)
+        take_profit = entry_price * (1 + tp_frac)
     else:
-        stop_loss = entry_price + sl_distance
-        take_profit = entry_price - tp_distance
+        stop_loss = entry_price * (1 + sl_frac)
+        take_profit = entry_price * (1 - tp_frac)
 
-    # Сколько долларов рискуем
-    risk_usdt = balance_usdt * config.RISK_PER_TRADE
-
-    # Размер позиции в USDT = риск / % расстояния до SL
-    sl_percent = abs(entry_price - stop_loss) / entry_price
-    position_size_usdt = risk_usdt / sl_percent
-    position_size_usdt = min(position_size_usdt, balance_usdt * 0.2)  # не более 20% баланса
-
-    quantity = position_size_usdt / entry_price
-
-    rr_ratio = abs(take_profit - entry_price) / abs(stop_loss - entry_price)
+    position_size_usdt = margin_usdt
+    quantity = margin_usdt / entry_price
+    rr_ratio = (tp_percent / sl_percent) if sl_percent > 0 else 0.0
+    # Оценка риска в USDT на маржу при срабатывании SL (упрощённо)
+    risk_usdt = margin_usdt * sl_frac
 
     return RiskParams(
         entry_price=round(entry_price, 2),

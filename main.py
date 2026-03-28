@@ -54,9 +54,11 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling()
 
-    logger.info("✅ TRAIDER запущен и анализирует рынок каждые 15 минут")
+    logger.info("✅ TRAIDER запущен (тик 1 мин; таймфрейм — в настройках каждого пользователя)")
     logger.info(f"Символы: {', '.join(config.TRADING_SYMBOLS)}")
     logger.info(f"Режим: {'TESTNET' if config.BINANCE_TESTNET else 'PRODUCTION'}")
+    if config.VERBOSE_SIGNAL_ANALYSIS:
+        logger.info("Подробный лог сигналов: VERBOSE_SIGNAL_ANALYSIS=true (причины пропуска в stdout)")
 
     # Держим процесс живым
     try:

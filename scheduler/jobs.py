@@ -13,44 +13,74 @@ from database import repository
 from database.models import SignalStatus
 
 
-async def analyze_market() -> None:
-    """Анализ рынка по всем символам — запускается каждые 15 минут."""
-    logger.info("Запуск анализа рынка...")
+_scheduler: AsyncIOScheduler = None
 
-    # Сначала сбрасываем просроченные сигналы
+
+def get_scheduler() -> AsyncIOScheduler:
+    return _scheduler
+
+
+async def analyze_market() -> None:
+    """Анализ рынка — у каждого пользователя свой таймфрейм (троттлинг по last_market_analysis_at)."""
+    from datetime import datetime
+
+    users = repository.get_active_users()
+
+    if not users:
+        logger.warning("Нет активных пользователей с настроенными API ключами")
+        return
+
+    now = datetime.utcnow()
+    logger.debug(f"Тик анализа рынка для {len(users)} пользователей (UTC {now})...")
     expire_old_signals()
 
-    # Анализируем каждый символ
-    for symbol in config.TRADING_SYMBOLS:
-        signal = generate_signal(symbol)
-        if signal is None:
+    from telegram import Bot
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+
+    for user in users:
+        tf = getattr(user, "timeframe", None) or config.TIMEFRAME
+        minutes = config.SUPPORTED_TIMEFRAMES.get(tf, 15)
+        last = getattr(user, "last_market_analysis_at", None)
+        if last is not None and (now - last).total_seconds() < minutes * 60:
             continue
 
-        # Отправляем карточку с кнопками в Telegram
-        text = format_signal_card(signal)
-        keyboard = build_signal_keyboard(signal.id)
+        for symbol in config.TRADING_SYMBOLS:
+            gen = generate_signal(symbol, user=user)
+            if gen is None:
+                continue
+            signal, trigger_reason = gen
 
-        from telegram import Bot
-        bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        msg = await bot.send_message(
-            chat_id=config.TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+            text = format_signal_card(
+                signal,
+                leverage=getattr(user, "leverage", 1),
+                trigger_reason=trigger_reason,
+            )
+            keyboard = build_signal_keyboard(signal.id)
 
-        # Сохраняем message_id чтобы потом обновлять карточку
-        repository.update_signal_status(signal.id, SignalStatus.PENDING, telegram_message_id=msg.message_id)
-        logger.info(f"Сигнал #{signal.id} отправлен в Telegram")
+            try:
+                msg = await bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+                repository.update_signal_status(
+                    signal.id, SignalStatus.PENDING, telegram_message_id=msg.message_id
+                )
+                logger.info(f"Сигнал #{signal.id} → user {user.telegram_id} [{tf}]")
+            except Exception as e:
+                logger.error(f"Ошибка отправки сигнала user {user.telegram_id}: {e}")
+
+        repository.touch_user_last_analysis(user.telegram_id)
 
 
 async def monitor_positions() -> None:
-    """Проверка открытых позиций — запускается каждые 2 минуты."""
+    """Проверка открытых позиций — каждые 2 минуты."""
     await check_positions()
 
 
 async def weekly_report() -> None:
-    """Еженедельный отчёт — каждое воскресенье в 20:00."""
+    """Еженедельный отчёт — каждое воскресенье в 20:00 UTC."""
     from datetime import datetime, timedelta
     from sqlalchemy import select
     from sqlalchemy.orm import Session
@@ -66,20 +96,33 @@ async def weekly_report() -> None:
 
     stats = repository.get_statistics()
     text = format_weekly_report(stats, week_trades)
-    await send_message(text)
-    logger.info("Еженедельный отчёт отправлен")
+
+    from telegram import Bot
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    for user in repository.get_active_users():
+        try:
+            await bot.send_message(chat_id=user.telegram_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Ошибка отправки отчёта user {user.telegram_id}: {e}")
+
+
+def reschedule_analysis(minutes: int) -> None:
+    """Совместимость: таймфрейм хранится в users.timeframe; job всегда раз в минуту."""
+    global _scheduler
+    if _scheduler and _scheduler.get_job("analyze_market"):
+        _scheduler.reschedule_job("analyze_market", trigger="interval", minutes=1)
+        logger.info("Планировщик: тик 1 мин (интервал анализа — в настройках пользователя)")
 
 
 def build_scheduler() -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    global _scheduler
 
-    # Анализ рынка каждые 15 минут
-    scheduler.add_job(analyze_market, "interval", minutes=15, id="analyze_market")
+    tick_min = min(config.SUPPORTED_TIMEFRAMES.values())
 
-    # Мониторинг позиций каждые 2 минуты
-    scheduler.add_job(monitor_positions, "interval", minutes=2, id="monitor_positions")
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+    _scheduler.add_job(analyze_market, "interval", minutes=tick_min, id="analyze_market")
+    _scheduler.add_job(monitor_positions, "interval", minutes=2, id="monitor_positions")
+    _scheduler.add_job(weekly_report, "cron", day_of_week="sun", hour=20, minute=0, id="weekly_report")
 
-    # Еженедельный отчёт — воскресенье 20:00 UTC
-    scheduler.add_job(weekly_report, "cron", day_of_week="sun", hour=20, minute=0, id="weekly_report")
-
-    return scheduler
+    logger.info(f"Планировщик: тик каждые {tick_min} мин; таймфрейм — у каждого пользователя в БД")
+    return _scheduler

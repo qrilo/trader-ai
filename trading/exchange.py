@@ -4,19 +4,17 @@ from loguru import logger
 from config import config
 
 
-def get_exchange() -> ccxt.binance:
+def get_exchange(api_key: str = None, api_secret: str = None) -> ccxt.binance:
     """
     Создать подключение к торговой бирже.
-    Testnet — для тестирования без реальных денег.
-    Production — для реальной торговли.
-    Данные (свечи, цены) всегда берём с реального Binance отдельно.
+    Если api_key/api_secret не переданы — используются ключи из .env.
     """
     exchange = ccxt.binance(
         {
-            "apiKey": config.BINANCE_API_KEY,
-            "secret": config.BINANCE_API_SECRET,
+            "apiKey": api_key or config.BINANCE_API_KEY,
+            "secret": api_secret or config.BINANCE_API_SECRET,
             "options": {"defaultType": "future"},
-            "adjustForTimeDifference": True,  # автоматически синхронизирует время с сервером
+            "adjustForTimeDifference": True,
         }
     )
     if config.BINANCE_TESTNET:
@@ -25,6 +23,22 @@ def get_exchange() -> ccxt.binance:
     else:
         logger.debug("Торговля: Binance PRODUCTION")
     return exchange
+
+
+def get_exchange_for_user(user) -> ccxt.binance:
+    """Создать биржевое подключение с ключами конкретного пользователя."""
+    if not user.has_api_keys:
+        raise ValueError(f"У пользователя {user.telegram_id} не настроены API ключи Binance")
+    return get_exchange(api_key=user.get_api_key(), api_secret=user.get_api_secret())
+
+
+def set_leverage(exchange: ccxt.binance, symbol: str, leverage: int) -> None:
+    """Установить плечо для символа."""
+    try:
+        exchange.set_leverage(leverage, symbol)
+        logger.info(f"Плечо {leverage}× установлено для {symbol}")
+    except Exception as e:
+        logger.warning(f"Не удалось установить плечо: {e}")
 
 
 def _sync_time() -> ccxt.binance:

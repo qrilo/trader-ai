@@ -5,6 +5,7 @@ import joblib
 import pandas as pd
 from loguru import logger
 
+from config import config
 from data.indicators import add_indicators, add_price_ratios
 
 
@@ -14,28 +15,30 @@ MODELS_DIR = Path(__file__).parent / "saved"
 class Predictor:
     """Загружает обученную модель и делает предсказания."""
 
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, timeframe: str = None):
         self.symbol = symbol
-        self.symbol_key = symbol.replace("/", "_")
+        self.timeframe = timeframe or config.TIMEFRAME
+        self._key = f"{symbol.replace('/', '_')}_{self.timeframe}"
         self.model = None
         self.scaler = None
         self.feature_columns = None
         self._load()
 
     def _load(self) -> None:
-        model_path = MODELS_DIR / f"{self.symbol_key}_model.pkl"
-        scaler_path = MODELS_DIR / f"{self.symbol_key}_scaler.pkl"
-        features_path = MODELS_DIR / f"{self.symbol_key}_features.pkl"
+        model_path = MODELS_DIR / f"{self._key}_model.pkl"
+        scaler_path = MODELS_DIR / f"{self._key}_scaler.pkl"
+        features_path = MODELS_DIR / f"{self._key}_features.pkl"
 
         if not model_path.exists():
             raise FileNotFoundError(
-                f"Модель для {self.symbol} не найдена. Запустите обучение: train_all()"
+                f"Модель для {self.symbol} [{self.timeframe}] не найдена. "
+                f"Запустите обучение через бота: ⚙️ Настройки → 🔄 Переобучить"
             )
 
         self.model = joblib.load(model_path)
         self.scaler = joblib.load(scaler_path)
         self.feature_columns = joblib.load(features_path)
-        logger.debug(f"Модель {self.symbol} загружена")
+        logger.debug(f"Модель {self.symbol} [{self.timeframe}] загружена")
 
     def predict(self, df: pd.DataFrame) -> Optional[float]:
         """
@@ -52,7 +55,7 @@ class Predictor:
             X_scaled = self.scaler.transform(last_row)
             proba = self.model.predict_proba(X_scaled)[0][1]
 
-            logger.debug(f"{self.symbol}: вероятность роста {proba:.3f}")
+            logger.debug(f"{self.symbol} [{self.timeframe}]: вероятность роста {proba:.3f}")
             return float(proba)
 
         except Exception as e:
@@ -60,15 +63,22 @@ class Predictor:
             return None
 
     def is_model_available(self) -> bool:
-        model_path = MODELS_DIR / f"{self.symbol_key}_model.pkl"
-        return model_path.exists()
+        return (MODELS_DIR / f"{self._key}_model.pkl").exists()
 
 
 _predictors: dict[str, Predictor] = {}
 
 
-def get_predictor(symbol: str) -> Predictor:
+def get_predictor(symbol: str, timeframe: str = None) -> Predictor:
     """Кешированный доступ к предиктору."""
-    if symbol not in _predictors:
-        _predictors[symbol] = Predictor(symbol)
-    return _predictors[symbol]
+    timeframe = timeframe or config.TIMEFRAME
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key not in _predictors:
+        _predictors[cache_key] = Predictor(symbol, timeframe)
+    return _predictors[cache_key]
+
+
+def clear_predictor_cache() -> None:
+    """Сбросить кэш предикторов (нужно при смене таймфрейма)."""
+    _predictors.clear()
+    logger.info("Кэш предикторов сброшен")

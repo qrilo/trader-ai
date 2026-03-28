@@ -5,51 +5,63 @@ load_dotenv()
 
 
 class Config:
-    # Binance
-    BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
-    BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")
-    BINANCE_TESTNET: bool = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
+    BINANCE_TESTNET: bool = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 
-    # Telegram
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: int = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 
-    # PostgreSQL
+    TELEGRAM_WHITELIST: list[int] = [
+        int(x.strip())
+        for x in os.getenv("TELEGRAM_WHITELIST", "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")
+
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", "postgresql://postgres:traider@localhost:5432/traider"
     )
 
-    # Параметры торговли
-    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.05"))
-    MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "0.65"))
-    SIGNAL_TIMEOUT_MINUTES: int = int(os.getenv("SIGNAL_TIMEOUT_MINUTES", "10"))
-    MIN_RR_RATIO: float = float(os.getenv("MIN_RR_RATIO", "2.0"))
+    TRADING_SYMBOLS: list[str] = os.getenv("TRADING_SYMBOLS", "BTC/USDT").split(",")
 
-    # Активы
-    TRADING_SYMBOLS: list[str] = os.getenv(
-        "TRADING_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT"
-    ).split(",")
-
-    # Таймфрейм
+    # Таймфрейм при первом запуске (потом меняется через бота ⚙️ Настройки)
     TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
 
-    # Сколько исторических свечей загружать для анализа
-    CANDLES_LIMIT: int = 500
+    # Интервалы из справочника Binance (10m у биржи нет — дефолт 15m)
+    SUPPORTED_TIMEFRAMES: dict = {
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+    }
 
-    # Сколько лет исторических данных для обучения модели
+    CANDLES_LIMIT: int = 500
     TRAINING_YEARS: int = 2
+
+    # Дефолтные торговые настройки для новых пользователей
+    DEFAULT_MARGIN_USDT: float = float(os.getenv("DEFAULT_MARGIN_USDT", "50"))
+    DEFAULT_SL_PERCENT: float = float(os.getenv("DEFAULT_SL_PERCENT", "1.5"))
+    DEFAULT_TP_PERCENT: float = float(os.getenv("DEFAULT_TP_PERCENT", "3.0"))
+    DEFAULT_MAX_OPEN_POSITIONS: int = 3
+    DEFAULT_MIN_CONFIDENCE: float = 0.65
+    DEFAULT_SIGNAL_TIMEOUT_MINUTES: int = 10
+    DEFAULT_MIN_RR_RATIO: float = 2.0
+
+    # Подробные причины отказа в генерации сигнала (stdout INFO); иначе только DEBUG в traider.log
+    VERBOSE_SIGNAL_ANALYSIS: bool = os.getenv("VERBOSE_SIGNAL_ANALYSIS", "false").lower() == "true"
 
     def validate(self) -> None:
         errors = []
-        if not self.BINANCE_API_KEY:
-            errors.append("BINANCE_API_KEY не задан")
-        if not self.BINANCE_API_SECRET:
-            errors.append("BINANCE_API_SECRET не задан")
         if not self.TELEGRAM_BOT_TOKEN:
             errors.append("TELEGRAM_BOT_TOKEN не задан")
-        if not self.TELEGRAM_CHAT_ID:
-            errors.append("TELEGRAM_CHAT_ID не задан")
+        if not self.TELEGRAM_WHITELIST:
+            errors.append("TELEGRAM_WHITELIST не задан — добавь хотя бы один Telegram ID")
+        if not self.ENCRYPTION_KEY:
+            import warnings
+            warnings.warn(
+                "ENCRYPTION_KEY не задан — Binance ключи хранятся без шифрования! "
+                "Сгенерируй: docker compose run --rm traider python -c "
+                "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
         if errors:
             raise ValueError("Ошибки конфигурации:\n" + "\n".join(errors))
 

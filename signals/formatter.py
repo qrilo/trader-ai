@@ -1,7 +1,11 @@
 from database.models import Signal, SignalDirection, Statistics, Trade, TradeStatus
 
 
-def format_signal_card(signal: Signal) -> str:
+def format_signal_card(
+    signal: Signal,
+    leverage: int = 1,
+    trigger_reason: str | None = None,
+) -> str:
     """Форматировать карточку сигнала для Telegram."""
     direction_emoji = "📈" if signal.direction == SignalDirection.LONG else "📉"
     direction_text = "LONG (покупка)" if signal.direction == SignalDirection.LONG else "SHORT (продажа)"
@@ -9,16 +13,29 @@ def format_signal_card(signal: Signal) -> str:
     sl_pct = abs(signal.stop_loss - signal.entry_price) / signal.entry_price * 100
     tp_pct = abs(signal.take_profit - signal.entry_price) / signal.entry_price * 100
 
+    notional = signal.position_size_usdt * leverage
     sentiment_text = _format_sentiment(signal.sentiment_score)
     confidence_bar = _confidence_bar(signal.ml_confidence)
 
+    size_line = (
+        f"💰 Маржа: <b>${signal.position_size_usdt:,.0f}</b>  ⚡️ {leverage}×  "
+        f"→ notional <b>${notional:,.0f}</b>"
+        if leverage > 1
+        else f"💰 Размер:      <b>${signal.position_size_usdt:,.0f}</b>"
+    )
+
+    why_block = ""
+    if trigger_reason:
+        why_block = f"💡 <b>Почему сработало</b>\n{trigger_reason}\n\n"
+
     return (
         f"🔔 <b>Новый сигнал: {signal.symbol} {direction_text}</b>\n"
+        f"{why_block}"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{direction_emoji} Вход:         <b>${signal.entry_price:,.2f}</b>\n"
         f"🛑 Stop Loss:   <b>${signal.stop_loss:,.2f}</b>  (-{sl_pct:.1f}%)\n"
         f"🎯 Take Profit: <b>${signal.take_profit:,.2f}</b>  (+{tp_pct:.1f}%)\n"
-        f"💰 Размер:      <b>${signal.position_size_usdt:,.0f}</b>\n"
+        f"{size_line}\n"
         f"📊 R/R:         <b>1 : {signal.risk_reward_ratio:.1f}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 Уверенность: {confidence_bar} {signal.ml_confidence:.0%}\n"

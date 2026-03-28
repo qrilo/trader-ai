@@ -1,38 +1,35 @@
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 
 from loguru import logger
 
 from config import config
-from data.collector import fetch_candles, get_account_balance
+from data.collector import fetch_candles
 from data.indicators import add_indicators, add_price_ratios
 from database import repository
-from database.models import Signal, SignalDirection, SignalStatus
+from database.models import Signal, SignalDirection, SignalStatus, User
 from models.predictor import get_predictor
 from models.sentiment import analyze_sentiment
 from signals.risk import calculate_risk_params
 
 
-@dataclass
-class SignalCandidate:
-    symbol: str
-    direction: str
-    confidence: float
-    entry_price: float
-    atr: float
-    rsi: float
-    macd: float
-    volume_ratio: float
-    sentiment_score: float
-    reason: str
+def _log_signal_skip(symbol: str, user_id: int, reason: str) -> None:
+    msg = f"{symbol} (user={user_id}): пропуск — {reason}"
+    if config.VERBOSE_SIGNAL_ANALYSIS:
+        logger.info(msg)
+    else:
+        logger.debug(msg)
+
+
+def _log_analyze_start(symbol: str, user_id: int) -> None:
+    msg = f"Анализ {symbol} (user={user_id})..."
+    if config.VERBOSE_SIGNAL_ANALYSIS:
+        logger.info(msg)
+    else:
+        logger.debug(msg)
 
 
 def _detect_direction(df, confidence: float) -> Optional[str]:
-    """
-    Определить направление сделки на основе индикаторов.
-    Возвращает LONG, SHORT или None если нет чёткого сигнала.
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -45,7 +42,6 @@ def _detect_direction(df, confidence: float) -> Optional[str]:
     long_score = 0
     short_score = 0
 
-    # RSI: перепроданность → LONG, перекупленность → SHORT
     if rsi < 35:
         long_score += 2
     elif rsi < 45:
@@ -55,7 +51,6 @@ def _detect_direction(df, confidence: float) -> Optional[str]:
     elif rsi > 55:
         short_score += 1
 
-    # MACD пересечение
     if macd_hist > 0 and prev_macd_hist <= 0:
         long_score += 2
     elif macd_hist > 0:
@@ -65,20 +60,17 @@ def _detect_direction(df, confidence: float) -> Optional[str]:
     elif macd_hist < 0:
         short_score += 1
 
-    # Цена относительно EMA200 (глобальный тренд)
     if price_vs_ema200 > 0.02:
         long_score += 1
     elif price_vs_ema200 < -0.02:
         short_score += 1
 
-    # Подтверждение объёмом
     if volume_ratio > 1.3:
         if long_score > short_score:
             long_score += 1
         elif short_score > long_score:
             short_score += 1
 
-    # ML уверенность корректирует направление
     if confidence > 0.65:
         long_score += 1
     elif confidence < 0.35:
@@ -91,100 +83,140 @@ def _detect_direction(df, confidence: float) -> Optional[str]:
     return None
 
 
-def _build_reason(last_row, direction: str, sentiment_score: float) -> str:
-    """Сформировать текстовое объяснение сигнала."""
-    reasons = []
+def _build_trigger_reason(
+    last_row,
+    direction: str,
+    sentiment_score: float,
+    effective_confidence: float,
+    timeframe: str,
+    min_confidence: float,
+    sl_pct: float,
+    tp_pct: float,
+    rr: float,
+) -> str:
+    """Краткое объяснение для Telegram: почему сработал триггер."""
+    rsi = float(last_row["rsi"])
+    macd_hist = float(last_row["macd_hist"])
+    vol_r = float(last_row["volume_ratio"])
+    p_ema = float(last_row.get("price_vs_ema200", 0) or 0)
 
-    rsi = last_row["rsi"]
-    macd_hist = last_row["macd_hist"]
-    volume_ratio = last_row["volume_ratio"]
-
-    if direction == "LONG":
-        if rsi < 35:
-            reasons.append(f"RSI={rsi:.0f} (перепроданность)")
-        if macd_hist > 0:
-            reasons.append("MACD бычье пересечение")
+    lines = [
+        f"таймфрейм <b>{timeframe}</b>, направление <b>{direction}</b>",
+        f"ML: уверенность <b>{effective_confidence:.0%}</b> (мин. порог {min_confidence:.0%})",
+        f"RSI <b>{rsi:.0f}</b>, MACD hist {macd_hist:+.4f}",
+    ]
+    if vol_r > 1.3:
+        lines.append(f"объём выше среднего (×{vol_r:.2f})")
+    if abs(p_ema) > 0.02:
+        lines.append(
+            "цена " + ("выше" if p_ema > 0 else "ниже") + f" EMA200 ({p_ema:+.1%})"
+        )
+    if sentiment_score > 0.2:
+        lines.append("новости: позитивный фон (FinBERT)")
+    elif sentiment_score < -0.2:
+        lines.append("новости: негативный фон (FinBERT)")
     else:
-        if rsi > 65:
-            reasons.append(f"RSI={rsi:.0f} (перекупленность)")
-        if macd_hist < 0:
-            reasons.append("MACD медвежье пересечение")
+        lines.append("новости: нейтрально")
 
-    if volume_ratio > 1.3:
-        reasons.append(f"объём +{(volume_ratio - 1) * 100:.0f}% от среднего")
+    lines.append(f"риск: SL {sl_pct:.1f}% / TP {tp_pct:.1f}% → R/R <b>1:{rr:.1f}</b>")
 
-    if sentiment_score > 0.3:
-        reasons.append("позитивный новостной фон")
-    elif sentiment_score < -0.3:
-        reasons.append("негативный новостной фон")
-
-    return ", ".join(reasons) if reasons else "технический сигнал"
+    return "\n".join(f"• {line}" for line in lines)
 
 
-def generate_signal(symbol: str) -> Optional[Signal]:
-    """
-    Главная функция: анализирует символ и возвращает Signal если есть возможность,
-    или None если условия не выполнены.
-    """
-    logger.info(f"Анализ {symbol}...")
+def _get_account_balance(user: User) -> float:
+    """Получить баланс конкретного пользователя."""
+    from trading.exchange import get_exchange_for_user
+    exchange = get_exchange_for_user(user)
+    exchange.load_time_difference()
+    balance = exchange.fetch_balance()
+    return float(balance.get("USDT", {}).get("free", 0.0))
+
+
+def generate_signal(symbol: str, user: User) -> Optional[Tuple[Signal, str]]:
+    """Анализирует символ. Возвращает (Signal, текст «почему сработало») или None."""
+    _log_analyze_start(symbol, user.telegram_id)
+
+    min_confidence = user.min_confidence
+    max_open_positions = user.max_open_positions
+    signal_timeout = user.signal_timeout_minutes
+    min_rr = user.min_rr_ratio
+    user_id = user.telegram_id
 
     try:
-        # Загружаем свежие свечи
-        df = fetch_candles(symbol)
+        timeframe = getattr(user, "timeframe", None) or config.TIMEFRAME
+        df = fetch_candles(symbol, timeframe=timeframe)
         df = add_indicators(df)
         df = add_price_ratios(df)
 
-        # ML-предсказание
-        predictor = get_predictor(symbol)
+        predictor = get_predictor(symbol, timeframe)
         confidence = predictor.predict(df)
         if confidence is None:
+            _log_signal_skip(symbol, user_id, "ML: нет предсказания (модель вернула None)")
             return None
 
         last = df.iloc[-1]
         entry_price = float(last["close"])
-        atr = float(last["atr"])
 
-        # Определяем направление
         direction = _detect_direction(df, confidence)
         if direction is None:
-            logger.debug(f"{symbol}: нет чёткого направления")
+            _log_signal_skip(
+                symbol,
+                user_id,
+                "направление: нет устойчивого LONG/SHORT (порог по индикаторам не набран)",
+            )
             return None
 
-        # Проверяем порог уверенности ML
         effective_confidence = confidence if direction == "LONG" else (1 - confidence)
-        if effective_confidence < config.MIN_CONFIDENCE:
-            logger.debug(f"{symbol}: уверенность {effective_confidence:.2f} < {config.MIN_CONFIDENCE}")
+        if effective_confidence < min_confidence:
+            _log_signal_skip(
+                symbol,
+                user_id,
+                f"ML: уверенность {effective_confidence:.2f} < порога {min_confidence} ({direction})",
+            )
             return None
 
-        # Анализ сентимента новостей
-        sentiment = analyze_sentiment(symbol)
+        sentiment = analyze_sentiment(symbol, user=user)
 
-        # Формируем сигнал
-        reason = _build_reason(last, direction, sentiment.score)
-
-        # Проверяем количество открытых позиций
-        open_trades = repository.get_open_trades()
-        if len(open_trades) >= config.MAX_OPEN_POSITIONS:
-            logger.info(f"Достигнут лимит открытых позиций ({config.MAX_OPEN_POSITIONS})")
+        open_trades = repository.get_open_trades(user_id=user_id)
+        if len(open_trades) >= max_open_positions:
+            _log_signal_skip(
+                symbol,
+                user_id,
+                f"лимит позиций: открыто {len(open_trades)}/{max_open_positions}",
+            )
             return None
 
-        # Получаем баланс для расчёта размера позиции
-        balance = get_account_balance()
-        if balance < 10:
-            logger.warning("Недостаточно средств на балансе")
+        balance = _get_account_balance(user)
+
+        margin_usdt = float(getattr(user, "fixed_position_usdt", 0) or 0)
+        if margin_usdt <= 0:
+            margin_usdt = config.DEFAULT_MARGIN_USDT
+        sl_pct = float(getattr(user, "sl_percent", 0) or 0) or config.DEFAULT_SL_PERCENT
+        tp_pct = float(getattr(user, "tp_percent", 0) or 0) or config.DEFAULT_TP_PERCENT
+
+        if balance < margin_usdt:
+            logger.warning(
+                f"Недостаточно USDT: нужно маржу {margin_usdt}, на балансе {balance:.2f}"
+            )
             return None
 
-        # Рассчитываем риск-параметры
-        risk = calculate_risk_params(direction, entry_price, atr, balance)
+        risk = calculate_risk_params(
+            direction, entry_price, margin_usdt, sl_pct, tp_pct,
+        )
 
-        # Проверяем R/R
-        if risk.risk_reward_ratio < config.MIN_RR_RATIO:
-            logger.debug(f"{symbol}: R/R={risk.risk_reward_ratio:.2f} < {config.MIN_RR_RATIO}")
+        if risk.risk_reward_ratio < min_rr:
+            _log_signal_skip(
+                symbol,
+                user_id,
+                f"R/R={risk.risk_reward_ratio:.2f} < min_rr={min_rr} "
+                f"(SL {sl_pct:.1f}% / TP {tp_pct:.1f}%)",
+            )
             return None
 
-        # Создаём сигнал
         signal = Signal(
+            user_id=user_id,
             symbol=symbol,
+            timeframe=timeframe,
             direction=SignalDirection[direction],
             status=SignalStatus.PENDING,
             entry_price=risk.entry_price,
@@ -197,18 +229,31 @@ def generate_signal(symbol: str) -> Optional[Signal]:
             rsi=round(float(last["rsi"]), 2),
             macd=round(float(last["macd"]), 4),
             volume_change=round(float(last["volume_ratio"]) - 1, 3),
-            expires_at=datetime.utcnow() + timedelta(minutes=config.SIGNAL_TIMEOUT_MINUTES),
+            expires_at=datetime.utcnow() + timedelta(minutes=signal_timeout),
         )
 
         saved_signal = repository.save_signal(signal)
+        trigger_reason = _build_trigger_reason(
+            last,
+            direction,
+            sentiment.score,
+            effective_confidence,
+            timeframe,
+            min_confidence,
+            sl_pct,
+            tp_pct,
+            risk.risk_reward_ratio,
+        )
         logger.info(
-            f"Сигнал сгенерирован: {symbol} {direction} "
+            f"Сигнал #{saved_signal.id}: {symbol} {direction} "
             f"уверенность={effective_confidence:.0%} R/R={risk.risk_reward_ratio}"
         )
-        return saved_signal
+        return saved_signal, trigger_reason
 
     except FileNotFoundError:
-        logger.warning(f"Модель для {symbol} не обучена, пропускаем")
+        logger.warning(
+            f"{symbol} (user={user.telegram_id}): модель не обучена — нужно переобучение (trainer)"
+        )
         return None
     except Exception as e:
         logger.error(f"Ошибка генерации сигнала {symbol}: {e}")
@@ -216,7 +261,6 @@ def generate_signal(symbol: str) -> Optional[Signal]:
 
 
 def expire_old_signals() -> None:
-    """Отмечаем просроченные сигналы которые не были апрувнуты."""
     pending = repository.get_pending_signals()
     now = datetime.utcnow()
     for signal in pending:

@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
 from data.news import NewsItem, fetch_news
+
+if TYPE_CHECKING:
+    from database.models import User
 
 
 @dataclass
@@ -43,9 +46,10 @@ def _score_to_label(score: float) -> str:
     return "Нейтральный"
 
 
-def analyze_sentiment(symbol: str) -> SentimentResult:
+def analyze_sentiment(symbol: str, user: Optional["User"] = None) -> SentimentResult:
     """
     Получить новости по символу и проанализировать сентимент через FinBERT.
+    Профиль трейдера (маржа, плечо, SL/TP) добавляется в начало текста для контекста модели.
     При ошибке возвращает нейтральный результат.
     """
     news_items: list[NewsItem] = fetch_news(symbol)
@@ -58,9 +62,15 @@ def analyze_sentiment(symbol: str) -> SentimentResult:
         classifier = _load_finbert()
         texts = [item.title + ". " + item.summary[:200] for item in news_items]
 
+        prefix = ""
+        if user is not None:
+            from signals.user_context import format_user_trading_context
+            prefix = format_user_trading_context(user)
+
         scores = []
         for text in texts:
-            result = classifier(text[:512], truncation=True)[0]
+            combined = (prefix + text)[:512]
+            result = classifier(combined, truncation=True)[0]
             scores.append(_label_to_score(result["label"]) * result["score"])
 
         avg_score = sum(scores) / len(scores)

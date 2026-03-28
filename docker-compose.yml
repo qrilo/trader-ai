@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: traider-db
+    environment:
+      POSTGRES_DB: traider
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: traider
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  trainer:
+    build: .
+    container_name: traider-trainer
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:traider@db:5432/traider
+    volumes:
+      - ./models/saved:/app/models/saved
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python -c "from models.trainer import train_all; train_all()"
+    profiles:
+      - train   # запускается только явно: docker compose --profile train up trainer
+
+  traider:
+    build: .
+    container_name: traider-app
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:traider@db:5432/traider
+    volumes:
+      - ./models/saved:/app/models/saved
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
